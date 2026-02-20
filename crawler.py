@@ -34,9 +34,9 @@ def normalize_url(base: str, href: str) -> Optional[str]:
 class CrawlerConfig:
     db_path: str
     seed_url: str
-    same_domain_only: bool = False          # défaut: crawl tout
-    max_pages: Optional[int] = None         # défaut: illimité
-    threads: int = 1                        # défaut: 1 thread
+    same_domain_only: bool = False          # default: crawl all domains
+    max_pages: Optional[int] = None         # default: unlimited
+    threads: int = 1                        # default: 1 thread
     request_timeout: int = 10
     delay_seconds: float = 0.5
     user_agent: str = "SimpleCrawler/1.0"
@@ -80,8 +80,8 @@ class Crawler:
 
     def worker_loop(self, worker_id: int) -> None:
         """
-        Boucle d’un worker. Plusieurs workers peuvent tourner en parallèle.
-        Chaque worker a sa propre session requests (thread-safe).
+        Worker loop. Multiple workers can run in parallel.
+        Each worker has its own requests session (thread-safe).
         """
         session = requests.Session()
         session.headers.update({"User-Agent": self.config.user_agent})

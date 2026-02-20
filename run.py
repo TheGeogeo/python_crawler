@@ -24,25 +24,25 @@ def wait_port_open(host: str, port: int, timeout_sec: float = 15.0) -> bool:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", required=True, help="URL de départ")
-    parser.add_argument("--db", default="crawler.sqlite", help="Fichier SQLite")
+    parser.add_argument("--seed", required=True, help="Seed URL")
+    parser.add_argument("--db", default="crawler.sqlite", help="SQLite file")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
 
-    # optionnel : si omis => illimité
-    parser.add_argument("--max-pages", type=int, default=None, help="Nombre max de pages (si omis: illimité)")
+    # Optional: if omitted, crawl is unlimited.
+    parser.add_argument("--max-pages", type=int, default=None, help="Maximum number of pages (if omitted: unlimited)")
 
-    # défaut : crawl tout ; flag si tu veux limiter au domaine du seed
-    parser.add_argument("--same-domain-only", action="store_true", help="Limiter le crawl au domaine du seed")
+    # Default: crawl all domains; use this flag to limit to the seed domain.
+    parser.add_argument("--same-domain-only", action="store_true", help="Limit crawling to the seed domain")
 
-    # ✅ multi-threads
-    parser.add_argument("--threads", type=int, default=1, help="Nombre de threads crawler (défaut: 1)")
+    # Multi-thread support
+    parser.add_argument("--threads", type=int, default=1, help="Number of crawler threads (default: 1)")
 
-    parser.add_argument("--delay", type=float, default=0.5, help="Délai entre requêtes (secondes)")
+    parser.add_argument("--delay", type=float, default=0.5, help="Delay between requests (seconds)")
     args = parser.parse_args()
 
     if args.threads < 1:
-        raise SystemExit("--threads doit être >= 1")
+        raise SystemExit("--threads must be >= 1")
 
     cfg = CrawlerConfig(
         db_path=args.db,
@@ -56,14 +56,14 @@ def main():
     crawler = Crawler(cfg)
     crawler.start_seed()
 
-    # Lance N threads workers
+    # Start N worker threads.
     for i in range(cfg.threads):
         t = threading.Thread(target=crawler.worker_loop, args=(i,), name=f"crawler-{i}", daemon=True)
         t.start()
 
     app = create_app(args.db)
 
-    # ouverture auto navigateur
+    # Auto-open browser
     open_host = args.host
     if open_host in ("0.0.0.0", "::"):
         open_host = "127.0.0.1"
