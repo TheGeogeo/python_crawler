@@ -1,11 +1,16 @@
 # webapp.py
 from html import escape
+from pathlib import Path
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 import db
+
+
+APP_DIR = Path(__file__).resolve().parent
+FAVICON_PATH = APP_DIR / "favicon.ico"
 
 
 BASE_HEAD = """
@@ -609,6 +614,12 @@ def render_activity_timeline(series: List[Dict[str, Any]], hours: int) -> str:
 
 def create_app(db_path: str) -> FastAPI:
     app = FastAPI(title="URL Collector")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        if FAVICON_PATH.is_file():
+            return FileResponse(FAVICON_PATH, media_type="image/x-icon")
+        return Response(status_code=204)
 
     @app.get("/", response_class=HTMLResponse)
     def home():
