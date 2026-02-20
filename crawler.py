@@ -12,11 +12,6 @@ import db
 
 
 def normalize_url(base: str, href: str) -> Optional[str]:
-    """
-    - résout les liens relatifs
-    - supprime les fragments (#...)
-    - ignore mailto:, tel:, javascript:
-    """
     if not href:
         return None
 
@@ -26,7 +21,7 @@ def normalize_url(base: str, href: str) -> Optional[str]:
         return None
 
     abs_url = urljoin(base, href)
-    abs_url, _frag = urldefrag(abs_url)  # retire #...
+    abs_url, _ = urldefrag(abs_url)
 
     parsed = urlparse(abs_url)
     if parsed.scheme not in ("http", "https"):
@@ -39,21 +34,23 @@ def normalize_url(base: str, href: str) -> Optional[str]:
 class CrawlerConfig:
     db_path: str
     seed_url: str
-    same_domain_only: bool = False          # ✅ par défaut: crawl tout
-    max_pages: Optional[int] = None         # ✅ par défaut: illimité
+    same_domain_only: bool = False          # défaut: crawl tout
+    max_pages: Optional[int] = None         # défaut: illimité
+    threads: int = 1                        # défaut: 1 thread
     request_timeout: int = 10
     delay_seconds: float = 0.5
-    user_agent: str = "SimpleSingleThreadCrawler/1.0"
+    user_agent: str = "SimpleCrawler/1.0"
 
 
-class SingleThreadCrawler:
+class Crawler:
     def __init__(self, config: CrawlerConfig):
         self.config = config
         self.stop_event = threading.Event()
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": self.config.user_agent})
 
         self.seed_host = urlparse(self.config.seed_url).netloc.lower()
+
+        self._count_lock = threading.Lock()
+        self._processed_pages = 0
 
     def start_seed(self) -> None:
         db.init_db(self.config.db_path)
@@ -67,12 +64,31 @@ class SingleThreadCrawler:
             return True
         return urlparse(url).netloc.lower() == self.seed_host
 
-    def run(self) -> None:
-        crawled_count = 0
+    def _should_stop_for_limit(self) -> bool:
+        if self.config.max_pages is None:
+            return False
+        with self._count_lock:
+            return self._processed_pages >= self.config.max_pages
+
+    def _mark_processed_and_maybe_stop(self) -> None:
+        if self.config.max_pages is None:
+            return
+        with self._count_lock:
+            self._processed_pages += 1
+            if self._processed_pages >= self.config.max_pages:
+                self.stop_event.set()
+
+    def worker_loop(self, worker_id: int) -> None:
+        """
+        Boucle d’un worker. Plusieurs workers peuvent tourner en parallèle.
+        Chaque worker a sa propre session requests (thread-safe).
+        """
+        session = requests.Session()
+        session.headers.update({"User-Agent": self.config.user_agent})
 
         while not self.stop_event.is_set():
-            # ✅ max_pages optionnel (None = pas de limite)
-            if self.config.max_pages is not None and crawled_count >= self.config.max_pages:
+            if self._should_stop_for_limit():
+                self.stop_event.set()
                 break
 
             item = db.pop_next_queued(self.config.db_path)
@@ -85,20 +101,18 @@ class SingleThreadCrawler:
             depth = item["depth"]
 
             try:
-                resp = self.session.get(url, timeout=self.config.request_timeout, allow_redirects=True)
+                resp = session.get(url, timeout=self.config.request_timeout, allow_redirects=True)
                 status_code = resp.status_code
 
                 content_type = (resp.headers.get("Content-Type") or "").lower()
                 if "text/html" not in content_type:
                     db.mark_crawled(self.config.db_path, url_id, status_code)
-                    crawled_count += 1
+                    self._mark_processed_and_maybe_stop()
                     time.sleep(self.config.delay_seconds)
                     continue
 
                 soup = BeautifulSoup(resp.text, "html.parser")
-                links = soup.find_all("a", href=True)
-
-                for a in links:
+                for a in soup.find_all("a", href=True):
                     n = normalize_url(resp.url, a.get("href"))
                     if not n:
                         continue
@@ -107,9 +121,10 @@ class SingleThreadCrawler:
                     db.add_url(self.config.db_path, n, depth=depth + 1, discovered_from=url)
 
                 db.mark_crawled(self.config.db_path, url_id, status_code)
-                crawled_count += 1
+                self._mark_processed_and_maybe_stop()
 
             except Exception as e:
                 db.mark_error(self.config.db_path, url_id, str(e))
+                self._mark_processed_and_maybe_stop()
 
             time.sleep(self.config.delay_seconds)

@@ -7,14 +7,11 @@ import webbrowser
 
 import uvicorn
 
-from crawler import CrawlerConfig, SingleThreadCrawler
+from crawler import CrawlerConfig, Crawler
 from webapp import create_app
 
 
 def wait_port_open(host: str, port: int, timeout_sec: float = 15.0) -> bool:
-    """
-    Attend que le serveur écoute vraiment, puis retourne True.
-    """
     start = time.time()
     while time.time() - start < timeout_sec:
         try:
@@ -32,33 +29,41 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
 
-    # ✅ optionnel: si non fourni => None => illimité
+    # optionnel : si omis => illimité
     parser.add_argument("--max-pages", type=int, default=None, help="Nombre max de pages (si omis: illimité)")
 
-    # ✅ par défaut crawl tout, et on ajoute un flag pour limiter au domaine si besoin
+    # défaut : crawl tout ; flag si tu veux limiter au domaine du seed
     parser.add_argument("--same-domain-only", action="store_true", help="Limiter le crawl au domaine du seed")
 
-    parser.add_argument("--delay", type=float, default=0.5, help="Delai entre requêtes (secondes)")
+    # ✅ multi-threads
+    parser.add_argument("--threads", type=int, default=1, help="Nombre de threads crawler (défaut: 1)")
+
+    parser.add_argument("--delay", type=float, default=0.5, help="Délai entre requêtes (secondes)")
     args = parser.parse_args()
+
+    if args.threads < 1:
+        raise SystemExit("--threads doit être >= 1")
 
     cfg = CrawlerConfig(
         db_path=args.db,
         seed_url=args.seed,
-        same_domain_only=args.same_domain_only,   # ✅ défaut: False
-        max_pages=args.max_pages,                 # ✅ défaut: None
+        same_domain_only=args.same_domain_only,
+        max_pages=args.max_pages,
+        threads=args.threads,
         delay_seconds=args.delay,
     )
 
-    crawler = SingleThreadCrawler(cfg)
+    crawler = Crawler(cfg)
     crawler.start_seed()
 
-    # Thread crawler (1 seul thread de crawl)
-    t = threading.Thread(target=crawler.run, name="crawler-thread", daemon=True)
-    t.start()
+    # Lance N threads workers
+    for i in range(cfg.threads):
+        t = threading.Thread(target=crawler.worker_loop, args=(i,), name=f"crawler-{i}", daemon=True)
+        t.start()
 
     app = create_app(args.db)
 
-    # ✅ ouverture auto du navigateur quand le serveur est prêt
+    # ouverture auto navigateur
     open_host = args.host
     if open_host in ("0.0.0.0", "::"):
         open_host = "127.0.0.1"
@@ -71,7 +76,6 @@ def main():
 
     threading.Thread(target=open_browser, daemon=True).start()
 
-    # Serveur web (1 worker)
     uvicorn.run(app, host=args.host, port=args.port, workers=1)
 
 

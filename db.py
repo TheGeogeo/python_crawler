@@ -51,8 +51,12 @@ def add_url(db_path: str, url: str, depth: int = 0, discovered_from: Optional[st
 def pop_next_queued(db_path: str) -> Optional[Dict[str, Any]]:
     """
     Récupère la prochaine URL en 'queued' et la passe en 'crawling' atomiquement.
+    (Important pour le multi-thread)
     """
     with get_conn(db_path) as conn:
+        # Verrouille en écriture le temps de choisir + updater (évite les races multi-threads)
+        conn.execute("BEGIN IMMEDIATE")
+
         row = conn.execute(
             "SELECT id, url, depth FROM urls WHERE status='queued' ORDER BY id ASC LIMIT 1"
         ).fetchone()
@@ -60,7 +64,15 @@ def pop_next_queued(db_path: str) -> Optional[Dict[str, Any]]:
         if not row:
             return None
 
-        conn.execute("UPDATE urls SET status='crawling' WHERE id=?", (row["id"],))
+        conn.execute(
+            "UPDATE urls SET status='crawling' WHERE id=? AND status='queued'",
+            (row["id"],),
+        )
+
+        # Si jamais un cas bizarre arrive, on sécurise
+        if conn.total_changes == 0:
+            return None
+
         return {"id": row["id"], "url": row["url"], "depth": row["depth"]}
 
 
