@@ -7,7 +7,7 @@ import webbrowser
 
 import uvicorn
 
-from crawler import CrawlerConfig, Crawler
+from crawler import Crawler, CrawlerConfig
 from webapp import create_app
 
 
@@ -55,13 +55,9 @@ def main():
 
     crawler = Crawler(cfg)
     crawler.start_seed()
+    crawler.start_workers(cfg.threads)
 
-    # Start N worker threads.
-    for i in range(cfg.threads):
-        t = threading.Thread(target=crawler.worker_loop, args=(i,), name=f"crawler-{i}", daemon=True)
-        t.start()
-
-    app = create_app(args.db)
+    app = create_app(args.db, crawler=crawler)
 
     # Auto-open browser
     open_host = args.host

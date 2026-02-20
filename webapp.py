@@ -1,10 +1,11 @@
 # webapp.py
 from html import escape
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 from fastapi import FastAPI, Query
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 import db
 
@@ -139,6 +140,9 @@ BASE_HEAD = """
     color: var(--text);
     padding: 8px 12px;
     font-size: 0.88rem;
+    font-family: inherit;
+    line-height: 1;
+    cursor: pointer;
     text-decoration: none;
     transition: border-color 0.14s ease, background-color 0.14s ease, transform 0.14s ease;
   }
@@ -426,6 +430,66 @@ BASE_HEAD = """
     white-space: nowrap;
   }
 
+  .control-grid {
+    margin-top: 14px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .control-card {
+    border: 1px solid #2d4168;
+    border-radius: 14px;
+    background: linear-gradient(180deg, #13203a, #0f1729);
+    padding: 14px;
+  }
+
+  .control-card h2 {
+    margin: 0 0 10px;
+    font-size: 1rem;
+    letter-spacing: 0.2px;
+  }
+
+  .control-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 8px 0;
+  }
+
+  .control-row label {
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+
+  .control-row input {
+    background: #0f1729;
+    color: var(--text);
+    border: 1px solid #364d79;
+    border-radius: 10px;
+    padding: 8px 10px;
+    min-width: 100px;
+    font-family: "IBM Plex Mono", Consolas, "Courier New", monospace;
+    font-size: 0.85rem;
+  }
+
+  .control-note {
+    margin: 0 0 10px;
+    color: var(--muted);
+    font-size: 0.86rem;
+  }
+
+  .message {
+    margin-top: 12px;
+    border: 1px solid #355284;
+    border-radius: 10px;
+    background: #13203a;
+    color: #b9d8ff;
+    padding: 10px 12px;
+    font-size: 0.88rem;
+  }
+
   @media (max-width: 940px) {
     .analytics-grid {
       grid-template-columns: minmax(0, 1fr);
@@ -433,6 +497,10 @@ BASE_HEAD = """
 
     .panel.wide {
       grid-column: span 1;
+    }
+
+    .control-grid {
+      grid-template-columns: minmax(0, 1fr);
     }
   }
 
@@ -612,8 +680,30 @@ def render_activity_timeline(series: List[Dict[str, Any]], hours: int) -> str:
     """
 
 
-def create_app(db_path: str) -> FastAPI:
+def create_app(db_path: str, crawler: Optional[Any] = None) -> FastAPI:
     app = FastAPI(title="URL Collector")
+
+    def _crawler_status() -> Dict[str, Any]:
+        if crawler is None:
+            return {
+                "available": False,
+                "paused": False,
+                "stop_requested": False,
+                "delay_seconds": 0.0,
+                "configured_threads": 0,
+                "alive_threads": 0,
+                "worker_ids": [],
+                "processed_pages": 0,
+                "max_pages": None,
+            }
+
+        state = crawler.runtime_status()
+        state["available"] = True
+        return state
+
+    def _control_redirect(message: str) -> RedirectResponse:
+        encoded = quote(message, safe="")
+        return RedirectResponse(url=f"/control?msg={encoded}", status_code=303)
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon():
@@ -654,6 +744,7 @@ def create_app(db_path: str) -> FastAPI:
         </div>
 
         <nav class="actions">
+          <a class="chip" href="/control">Control</a>
           <a class="chip" href="/stats">Statistics</a>
           <a class="chip" href="/urls">View all URLs</a>
           <a class="chip" href="/urls?status=queued">Queued</a>
@@ -706,6 +797,7 @@ def create_app(db_path: str) -> FastAPI:
         <div class="topline">
           <h1>URLs</h1>
           <nav class="actions">
+            <a class="chip" href="/control">Control</a>
             <a class="chip" href="/stats">Statistics</a>
             <a class="chip" href="/">Back</a>
           </nav>
@@ -735,6 +827,7 @@ def create_app(db_path: str) -> FastAPI:
         <div class="topline">
           <h1>Crawler Statistics</h1>
           <nav class="actions">
+            <a class="chip" href="/control">Control</a>
             <a class="chip" href="/urls">URLs</a>
             <a class="chip" href="/">Back</a>
           </nav>
@@ -785,6 +878,161 @@ def create_app(db_path: str) -> FastAPI:
         """
         return render_page("Crawler Statistics", body)
 
+    @app.get("/control", response_class=HTMLResponse)
+    def control_page(
+        msg: str | None = Query(default=None),
+    ):
+        state = _crawler_status()
+        message_html = f'<p class="message">{escape(msg)}</p>' if msg else ""
+
+        if not state["available"]:
+            body = f"""
+            <div class="topline">
+              <h1>Crawler Control</h1>
+              <nav class="actions">
+                <a class="chip" href="/stats">Statistics</a>
+                <a class="chip" href="/">Back</a>
+              </nav>
+            </div>
+            <p class="control-note">Runtime control is unavailable. Start the app with a crawler instance attached.</p>
+            {message_html}
+            """
+            return render_page("Crawler Control", body)
+
+        paused_text = "Paused" if state["paused"] else "Running"
+        paused_color = "error" if state["paused"] else "crawled"
+        worker_ids = ", ".join(str(w) for w in state["worker_ids"]) if state["worker_ids"] else "-"
+        max_pages = state["max_pages"] if state["max_pages"] is not None else "unlimited"
+
+        action_button = (
+            '<a class="chip" href="/control/resume">Resume crawler</a>'
+            if state["paused"]
+            else '<a class="chip" href="/control/pause">Pause crawler</a>'
+        )
+
+        body = f"""
+        <div class="topline">
+          <h1>Crawler Control</h1>
+          <nav class="actions">
+            <a class="chip" href="/stats">Statistics</a>
+            <a class="chip" href="/urls">URLs</a>
+            <a class="chip" href="/">Back</a>
+          </nav>
+        </div>
+
+        <div class="stats-grid">
+          <article class="stat">
+            <div class="stat-label">State</div>
+            <div class="stat-value {paused_color}">{paused_text}</div>
+          </article>
+          <article class="stat">
+            <div class="stat-label">Configured Threads</div>
+            <div class="stat-value">{state['configured_threads']}</div>
+          </article>
+          <article class="stat">
+            <div class="stat-label">Alive Threads</div>
+            <div class="stat-value">{state['alive_threads']}</div>
+          </article>
+          <article class="stat">
+            <div class="stat-label">Delay (seconds)</div>
+            <div class="stat-value">{state['delay_seconds']:.2f}</div>
+          </article>
+          <article class="stat">
+            <div class="stat-label">Processed Pages</div>
+            <div class="stat-value">{state['processed_pages']}</div>
+          </article>
+          <article class="stat">
+            <div class="stat-label">Max Pages</div>
+            <div class="stat-value">{max_pages}</div>
+          </article>
+        </div>
+
+        <div class="control-grid">
+          <section class="control-card">
+            <h2>Run State</h2>
+            <p class="control-note">Pause or resume workers without stopping the web app.</p>
+            <div class="control-row">
+              {action_button}
+            </div>
+          </section>
+
+          <section class="control-card">
+            <h2>Threads</h2>
+            <p class="control-note">Current worker IDs: {worker_ids}</p>
+            <form class="control-row" action="/control/add-threads" method="get">
+              <label for="add-count">Add</label>
+              <input id="add-count" name="count" type="number" min="1" max="64" step="1" value="1"/>
+              <button class="chip" type="submit">Add threads</button>
+            </form>
+            <form class="control-row" action="/control/remove-threads" method="get">
+              <label for="remove-count">Remove</label>
+              <input id="remove-count" name="count" type="number" min="1" max="64" step="1" value="1"/>
+              <button class="chip" type="submit">Remove threads</button>
+            </form>
+          </section>
+
+          <section class="control-card">
+            <h2>Request Delay</h2>
+            <p class="control-note">Set delay between crawler requests for each worker.</p>
+            <form class="control-row" action="/control/set-delay" method="get">
+              <label for="delay-seconds">Seconds</label>
+              <input id="delay-seconds" name="seconds" type="number" min="0" max="30" step="0.1" value="{state['delay_seconds']:.2f}"/>
+              <button class="chip" type="submit">Apply delay</button>
+            </form>
+          </section>
+
+          <section class="control-card">
+            <h2>API</h2>
+            <p class="control-note">Raw control status endpoint:</p>
+            <p class="meta-line"><a href="/api/control">/api/control</a></p>
+          </section>
+        </div>
+
+        {message_html}
+        """
+        return render_page("Crawler Control", body)
+
+    @app.get("/control/pause")
+    def control_pause():
+        if crawler is None:
+            return _control_redirect("Crawler control is unavailable.")
+        crawler.pause()
+        return _control_redirect("Crawler paused.")
+
+    @app.get("/control/resume")
+    def control_resume():
+        if crawler is None:
+            return _control_redirect("Crawler control is unavailable.")
+        crawler.resume()
+        return _control_redirect("Crawler resumed.")
+
+    @app.get("/control/add-threads")
+    def control_add_threads(
+        count: int = Query(default=1, ge=1, le=64),
+    ):
+        if crawler is None:
+            return _control_redirect("Crawler control is unavailable.")
+        added = crawler.add_threads(count)
+        return _control_redirect(f"Added {added} thread(s).")
+
+    @app.get("/control/remove-threads")
+    def control_remove_threads(
+        count: int = Query(default=1, ge=1, le=64),
+    ):
+        if crawler is None:
+            return _control_redirect("Crawler control is unavailable.")
+        removed = crawler.remove_threads(count)
+        return _control_redirect(f"Requested stop for {removed} thread(s).")
+
+    @app.get("/control/set-delay")
+    def control_set_delay(
+        seconds: float = Query(default=0.5, ge=0.0, le=30.0),
+    ):
+        if crawler is None:
+            return _control_redirect("Crawler control is unavailable.")
+        new_delay = crawler.set_delay_seconds(seconds)
+        return _control_redirect(f"Delay updated to {new_delay:.2f} second(s).")
+
     @app.get("/api/urls")
     def api_urls(
         status: str | None = Query(default=None),
@@ -807,5 +1055,9 @@ def create_app(db_path: str) -> FastAPI:
             "activity_last_hours": db.activity_last_hours(db_path, hours=hours),
         }
         return JSONResponse(payload)
+
+    @app.get("/api/control")
+    def api_control():
+        return JSONResponse(_crawler_status())
 
     return app
